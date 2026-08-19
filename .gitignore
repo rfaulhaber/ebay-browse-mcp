@@ -1,0 +1,13 @@
+.DS_Store
+.idea
+*.log
+tmp/
+
+.direnv
+.envrc.local
+target/
+result
+rust_out
+
+# symlink created by git-hooks.nix's installation script
+.pre-commit-config.yaml
