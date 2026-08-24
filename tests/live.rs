@@ -166,13 +166,22 @@ async fn paging_advances_through_distinct_results() {
 
 #[tokio::test]
 #[ignore = "hits the live eBay API"]
-async fn a_rejected_search_surfaces_ebays_own_complaint() {
-    // An implausible category id: eBay should reject it with a structured
-    // error rather than silently returning everything.
+async fn a_bogus_category_surfaces_ebays_own_complaint() {
+    // An implausible category id does not fail the call: eBay documents 12009
+    // as a *warning* — the search runs with the bad parameter dropped. What an
+    // agent needs is the complaint riding along in `warnings`; without it the
+    // response is indistinguishable from an unfiltered search that worked.
     let request = SearchRequest {
         category_ids: vec!["999999999".to_owned()],
         ..keyword("chair")
     };
-    let outcome = client().search(&request).await;
-    assert!(outcome.is_err(), "expected eBay to reject a bogus category");
+    let results = client().search(&request).await.unwrap();
+    assert!(
+        results
+            .warnings
+            .iter()
+            .any(|warning| warning.error_id == Some(12009)),
+        "expected eBay's category_ids complaint among the warnings, got {:?}",
+        results.warnings
+    );
 }

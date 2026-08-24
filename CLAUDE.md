@@ -75,6 +75,7 @@ These were each confirmed from eBay's own OpenAPI spec (v1.20.4) or its field-fi
 - **`offset` must be zero or an exact multiple of `limit`** (default 50). eBay errors otherwise rather than shifting the window. `limit` is 1–200, `offset` maxes at 9,999.
 - **Date filters take `YYYY-MM-DDTHH:MM:SSZ`** — no milliseconds.
 - **`getItemByLegacyId` does not support the `COMPACT` field group**, though `getItem` does. The item endpoints take four groups: `PRODUCT`, `COMPACT`, `ADDITIONAL_SELLER_DETAILS`, `CHARITY_DETAILS`.
+- **An invalid `category_ids` does not fail the search.** eBay documents 12009 as a *warning*: the bad parameter is dropped and the search returns HTTP 200 with listings anyway. The same goes for invalid filter values (12002) — the documented 400s for `search` (bad `limit`, `offset` off a page boundary) are all pre-empted client-side by `validate_constraints()`, so a live eBay 400 is effectively unreachable through `SearchRequest`. Rejections must be observed via `warnings`, not `Err`.
 - `aspect_filter` requires a leading `categoryId`; aspects without a category are dropped rather than sent invalid.
 - `price` is rejected without `priceCurrency`.
 - Item ids embed `|` (`v1|254188828753|0`) and must be percent-encoded into the path.

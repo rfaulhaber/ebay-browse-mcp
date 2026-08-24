@@ -5,6 +5,8 @@ tmp/
 
 .direnv
 .envrc.local
+# local eBay keyset
+config.json
 target/
 result
 rust_out
