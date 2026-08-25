@@ -102,6 +102,11 @@ pub enum ConfigError {
          and Cert ID (Client Secret)"
     )]
     MissingVar(&'static str),
+    #[error("{var} is not set, but EBAY_MCP_HTTP_ADDR enables the HTTP transport; {remedy}")]
+    MissingHttpVar {
+        var: &'static str,
+        remedy: &'static str,
+    },
     #[error("{var} has an invalid value {value:?}: {reason}")]
     InvalidVar {
         var: &'static str,
@@ -170,6 +175,121 @@ impl Config {
             affiliate_campaign_id: optional("EBAY_AFFILIATE_CAMPAIGN_ID"),
             request_timeout,
         })
+    }
+}
+
+/// Configuration for the remote (Streamable HTTP + OAuth) transport. Absent
+/// unless `EBAY_MCP_HTTP_ADDR` is set, in which case the rest becomes
+/// required.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    /// Local listen address, e.g. `0.0.0.0:8080`.
+    pub bind: std::net::SocketAddr,
+    /// The MCP endpoint URL exactly as it will be entered into the MCP
+    /// client. RFC 9728 requires the advertised `resource` to byte-match it,
+    /// so it is kept verbatim rather than normalized.
+    pub public_url: String,
+    /// Origin of `public_url`; OAuth endpoints and discovery documents live
+    /// there. TLS is expected to terminate at a reverse proxy in front of
+    /// `bind`.
+    pub issuer: String,
+    /// Path component of `public_url`, where the MCP service is mounted.
+    pub mcp_path: String,
+    /// Host component of `public_url`, for the transport's Host-header
+    /// (DNS-rebinding) validation.
+    pub public_host: String,
+    /// Shared secret the operator types on the consent page.
+    pub access_key: Secret,
+    /// HMAC key sealing every OAuth artifact. Rotating it revokes all of
+    /// them at once.
+    pub token_key: Secret,
+}
+
+impl HttpConfig {
+    /// Reads the HTTP transport configuration, or `None` when
+    /// `EBAY_MCP_HTTP_ADDR` is unset and the server should speak stdio.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the transport is enabled but a required
+    /// variable is absent or unparseable.
+    pub fn from_env() -> Result<Option<Self>, ConfigError> {
+        let Some(addr) = optional("EBAY_MCP_HTTP_ADDR") else {
+            return Ok(None);
+        };
+        let bind = addr
+            .parse::<std::net::SocketAddr>()
+            .map_err(|err| ConfigError::InvalidVar {
+                var: "EBAY_MCP_HTTP_ADDR",
+                value: addr.clone(),
+                reason: format!("{err}; expected an address like 0.0.0.0:8080"),
+            })?;
+
+        let public_url = optional("EBAY_MCP_PUBLIC_URL").ok_or(ConfigError::MissingHttpVar {
+            var: "EBAY_MCP_PUBLIC_URL",
+            remedy: "set it to the MCP endpoint URL exactly as it will be entered \
+                         into the client, e.g. https://mcp.example.com/mcp",
+        })?;
+        let parsed = url::Url::parse(&public_url).map_err(|err| ConfigError::InvalidVar {
+            var: "EBAY_MCP_PUBLIC_URL",
+            value: public_url.clone(),
+            reason: err.to_string(),
+        })?;
+        let invalid_url = |reason: &str| ConfigError::InvalidVar {
+            var: "EBAY_MCP_PUBLIC_URL",
+            value: public_url.clone(),
+            reason: reason.to_owned(),
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(invalid_url("the scheme must be http or https"));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(invalid_url(
+                "a query or fragment cannot be part of the MCP endpoint",
+            ));
+        }
+        let public_host = parsed
+            .host_str()
+            .ok_or_else(|| invalid_url("a host is required"))?
+            .to_owned();
+        let issuer = parsed.origin().ascii_serialization();
+        let mcp_path = parsed.path().to_owned();
+
+        let access_key = optional("EBAY_MCP_ACCESS_KEY").ok_or(ConfigError::MissingHttpVar {
+            var: "EBAY_MCP_ACCESS_KEY",
+            remedy: "set it to the secret (16+ characters) the operator will type on the \
+                     OAuth consent page",
+        })?;
+        if access_key.len() < 16 {
+            return Err(ConfigError::InvalidVar {
+                var: "EBAY_MCP_ACCESS_KEY",
+                value: "<redacted>".to_owned(),
+                reason: "must be at least 16 characters".to_owned(),
+            });
+        }
+
+        let token_key = optional("EBAY_MCP_TOKEN_KEY").ok_or(ConfigError::MissingHttpVar {
+            var: "EBAY_MCP_TOKEN_KEY",
+            remedy: "set it to at least 32 random characters (e.g. from `openssl rand \
+                     -base64 32`); rotating it revokes every issued token",
+        })?;
+        if token_key.len() < 32 {
+            return Err(ConfigError::InvalidVar {
+                var: "EBAY_MCP_TOKEN_KEY",
+                value: "<redacted>".to_owned(),
+                reason: "must be at least 32 characters".to_owned(),
+            });
+        }
+
+        Ok(Some(Self {
+            bind,
+            public_url,
+            issuer,
+            mcp_path,
+            public_host,
+            access_key: Secret::new(access_key),
+            token_key: Secret::new(token_key),
+        }))
     }
 }
 

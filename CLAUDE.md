@@ -2,13 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-An MCP server exposing eBay's Buy Browse API, built on `rmcp` over stdio.
+An MCP server exposing eBay's Buy Browse API, built on `rmcp`. Speaks stdio by default; setting `EBAY_MCP_HTTP_ADDR` switches to Streamable HTTP behind a built-in OAuth 2.1 provider, for self-hosting as a Claude.ai custom connector.
 
 ## Commands
 
 ```
 cargo build
-cargo test                              # 52 unit tests; no network needed
+cargo test                              # unit tests; no network needed
 cargo test --lib price_without_currency # single test, by substring of its name
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
@@ -49,6 +49,16 @@ Test modules therefore open with `#![allow(clippy::unwrap_used, reason = "...")]
 - `ebay/model.rs` — response types.
 - `ebay/client.rs` — HTTP, headers, error mapping.
 - `server.rs` — five tools, plus the `INSTRUCTIONS` string sent at connection time.
+- `oauth.rs` — single-operator OAuth 2.1 provider for remote use. Distinct from `ebay/auth.rs`: there this server is an OAuth *client* toward eBay; here it is an authorization server + resource server toward Claude. Every artifact (client id, code, tokens) is a stateless HMAC-sealed `Claims` blob — domain separation comes from the serde `typ` tag, revocation is "rotate `EBAY_MCP_TOKEN_KEY`".
+- `remote.rs` — axum router: RFC 9728/8414 discovery documents, DCR, consent page, token endpoint, and the bearer gate in front of rmcp's `StreamableHttpService`. `router()` is generic over the MCP service so tests gate a stub — this is how the remote tests stay off the `reqwest::Client` path.
+
+### Remote-transport facts verified against Anthropic's docs (2026-08)
+
+- Claude only starts OAuth discovery from a real **401** whose `WWW-Authenticate` carries `resource_metadata`; a challenge on a 200 is ignored.
+- The protected-resource metadata `resource` must **byte-match** the connector URL as entered in Claude — hence `EBAY_MCP_PUBLIC_URL` is kept verbatim, never normalized.
+- Claude registers a fresh DCR client per connection (hence stateless client ids), always uses PKCE S256, requests `offline_access` only because the AS metadata advertises it, and calls back to `https://claude.ai/api/mcp/auth_callback` (hosted) or port-agnostic `http://localhost/…` loopback (Claude Code).
+- Claude requires a public HTTPS hostname (it refuses names resolving to private/loopback addresses) and waits ≤10 s on OAuth endpoints. TLS terminates at a reverse proxy, which must forward the whole vhost: discovery and OAuth endpoints share the MCP origin.
+- rmcp 3.1.3 has **no server-side auth**; its `StreamableHttpServerConfig` is `#[non_exhaustive]` (use `::default().with_allowed_hosts(…)`), and its default `allowed_hosts` is localhost-only — the public hostname must be added or every proxied request is rejected.
 
 ### The filter layer is the point of the project
 

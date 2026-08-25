@@ -1,8 +1,15 @@
-//! Entry point for the stdio MCP server.
+//! Entry point. Speaks MCP over stdio by default; setting
+//! `EBAY_MCP_HTTP_ADDR` switches to the remote transport — Streamable HTTP
+//! behind the OAuth gate — for use as a self-hosted Claude.ai connector.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use ebay_browse_mcp::{Config, EbayBrowseServer};
+use ebay_browse_mcp::config::HttpConfig;
+use ebay_browse_mcp::oauth::OauthCore;
+use ebay_browse_mcp::{Config, EbayBrowseServer, remote};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
 
@@ -16,6 +23,8 @@ enum StartupError {
          the environment the MCP client launches this server from"
     )]
     Http(#[from] reqwest::Error),
+    #[error("could not bind the HTTP listener: {0}")]
+    Bind(std::io::Error),
     #[error("could not start the MCP server: {0}")]
     Serve(String),
 }
@@ -48,6 +57,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), StartupError> {
     let config = Config::from_env()?;
+    let http = HttpConfig::from_env()?;
     tracing::info!(
         environment = ?config.environment,
         marketplace = %config.default_marketplace,
@@ -55,6 +65,13 @@ async fn run() -> Result<(), StartupError> {
     );
 
     let server = EbayBrowseServer::new(&config)?;
+    match http {
+        Some(http) => serve_http(server, http).await,
+        None => serve_stdio(server).await,
+    }
+}
+
+async fn serve_stdio(server: EbayBrowseServer) -> Result<(), StartupError> {
     let running = server
         .serve(stdio())
         .await
@@ -68,4 +85,68 @@ async fn run() -> Result<(), StartupError> {
     tracing::info!(?reason, "eBay Browse MCP server stopped");
 
     Ok(())
+}
+
+async fn serve_http(server: EbayBrowseServer, http: HttpConfig) -> Result<(), StartupError> {
+    let core = Arc::new(OauthCore::new(
+        http.issuer.clone(),
+        http.public_url.clone(),
+        http.token_key.clone(),
+        http.access_key.clone(),
+    ));
+    // One eBay client shared across sessions: cloning the server clones its
+    // `Arc`s, so every connection reuses the same token cache.
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default().with_allowed_hosts([
+            http.public_host.as_str(),
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        ]),
+    );
+    let app = remote::router(core, &http.mcp_path, mcp_service);
+
+    let listener = tokio::net::TcpListener::bind(http.bind)
+        .await
+        .map_err(StartupError::Bind)?;
+    tracing::info!(
+        bind = %http.bind,
+        public_url = %http.public_url,
+        issuer = %http.issuer,
+        "serving MCP over streamable HTTP behind OAuth"
+    );
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|err| StartupError::Serve(err.to_string()))?;
+    tracing::info!("eBay Browse MCP server stopped");
+
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "could not install the Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not install the SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
 }

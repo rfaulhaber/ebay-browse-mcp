@@ -89,6 +89,17 @@ user ever has to sign in.
 | `EBAY_REQUEST_TIMEOUT_SECS` | no | `30` | Per-request timeout |
 | `EBAY_MCP_LOG` | no | `info` | `tracing` filter, e.g. `debug`, `ebay_browse_mcp=debug` |
 
+Setting `EBAY_MCP_HTTP_ADDR` switches the transport from stdio to Streamable
+HTTP behind OAuth (see [Remote use](#5-remote-use-as-a-claudeai-custom-connector)),
+and makes the rest of this table required:
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `EBAY_MCP_HTTP_ADDR` | HTTP mode | Listen address, e.g. `0.0.0.0:8080` |
+| `EBAY_MCP_PUBLIC_URL` | HTTP mode | The MCP endpoint URL exactly as entered into the client, e.g. `https://mcp.example.com/mcp` |
+| `EBAY_MCP_ACCESS_KEY` | HTTP mode | Secret (16+ chars) typed on the OAuth consent page |
+| `EBAY_MCP_TOKEN_KEY` | HTTP mode | HMAC key (32+ chars) sealing all OAuth artifacts; rotating it revokes every issued token |
+
 Note that the sandbox has almost no listing data; a sandbox search returning
 nothing is normal and not a sign of misconfiguration.
 
@@ -127,6 +138,46 @@ For Claude Code:
 claude mcp add ebay -e EBAY_CLIENT_ID=... -e EBAY_CLIENT_SECRET=... -- (nix build --print-out-paths --no-link | path join "bin/ebay-browse-mcp")
 ```
 
+### 5. Remote use as a Claude.ai custom connector
+
+With `EBAY_MCP_HTTP_ADDR` set, the binary serves MCP over Streamable HTTP
+with a built-in single-operator OAuth 2.1 provider: Claude discovers it via
+a 401 challenge and RFC 9728 metadata, registers itself dynamically, and the
+consent page asks for `EBAY_MCP_ACCESS_KEY`. Tokens are stateless
+HMAC-signed blobs, so restarts don't disconnect clients.
+
+The included `Dockerfile` builds an image that defaults to this mode:
+
+``` nu
+podman build -t ebay-browse-mcp .
+(podman run -d -p 8080:8080
+  -e $"EBAY_CLIENT_ID=($env.EBAY_CLIENT_ID)"
+  -e $"EBAY_CLIENT_SECRET=($env.EBAY_CLIENT_SECRET)"
+  -e EBAY_MCP_PUBLIC_URL=https://mcp.example.com/mcp
+  -e $"EBAY_MCP_ACCESS_KEY=($env.EBAY_MCP_ACCESS_KEY)"
+  -e $"EBAY_MCP_TOKEN_KEY=($env.EBAY_MCP_TOKEN_KEY)"
+  ebay-browse-mcp)
+```
+
+Requirements imposed by Claude.ai:
+
+- The server must be reachable on a **public HTTPS hostname** — Claude
+  refuses hostnames that resolve to private or loopback addresses, so a
+  VPN-only or LAN-only deployment will not connect. Terminate TLS at a
+  reverse proxy and forward the whole vhost (the OAuth endpoints and
+  `/.well-known/*` live on the same origin as the MCP path).
+- `EBAY_MCP_PUBLIC_URL` must byte-match the URL entered in Claude's
+  connector settings, including the path.
+
+Then in Claude.ai: Settings → Connectors → Add custom connector, with the
+URL from `EBAY_MCP_PUBLIC_URL`. When Claude opens the consent page, enter
+`EBAY_MCP_ACCESS_KEY`. To generate the two secrets:
+
+``` nu
+random chars --length 24   # EBAY_MCP_ACCESS_KEY
+random chars --length 48   # EBAY_MCP_TOKEN_KEY
+```
+
 ## Development
 
 ``` nu
@@ -153,7 +204,9 @@ src/
     filter.rs    typed search criteria -> eBay's `filter` mini-language
     model.rs     response types, deliberately narrower than eBay's wire format
   server.rs      MCP tool definitions
-  main.rs        stdio transport wiring
+  oauth.rs       single-operator OAuth 2.1 provider for remote use
+  remote.rs      Streamable HTTP router: discovery documents, consent, bearer gate
+  main.rs        transport wiring: stdio by default, HTTP when configured
 ```
 
 `ebay` has no MCP dependency and is usable as a plain Browse API client.
