@@ -159,6 +159,10 @@ podman build -t ebay-browse-mcp .
   ebay-browse-mcp)
 ```
 
+With Nix there is no Dockerfile step: `nix build .#oci-image` produces a
+script that streams an equivalent image as a docker-archive, so
+`./result | podman load` imports it directly.
+
 Requirements imposed by Claude.ai:
 
 - The server must be reachable on a **public HTTPS hostname** — Claude

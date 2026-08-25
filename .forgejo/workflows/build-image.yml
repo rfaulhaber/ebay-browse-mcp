@@ -1,0 +1,78 @@
+name: image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to main supersedes an in-flight build: the registry only ever
+# serves the newest image, so don't queue stale ones behind it.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The nixos/nix job image ships no experimental-features in its nix.conf,
+  # and the gate is checked by the CLI, not the daemon. Generous download
+  # retries: cache.nixos.org over HTTP/2 occasionally drops large NARs
+  # mid-transfer, and retries resume via range requests.
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    download-attempts = 15
+  # Forgejo's automatic actions token is read-only against the package
+  # registry, so the push authenticates as this user with a write:packages
+  # PAT stored in the repository's REGISTRY_TOKEN actions secret.
+  REGISTRY_USER: ryan
+
+jobs:
+  build-and-push:
+    runs-on: nix
+    timeout-minutes: 120
+    steps:
+      # actions/checkout needs node on the job image's PATH, which the
+      # nixos/nix image doesn't carry — clone by hand instead. Full clone +
+      # explicit checkout of the triggering SHA so a manual re-run still
+      # builds the commit it claims to.
+      - name: Checkout pushed commit
+        run: |
+          PROTO="${GITHUB_SERVER_URL%%://*}"
+          DOMAIN="${GITHUB_SERVER_URL#*://}"
+          git clone \
+            "${PROTO}://forgejo-actions:${GITHUB_TOKEN}@${DOMAIN}/${GITHUB_REPOSITORY}.git" .
+          git checkout "${GITHUB_SHA}"
+
+      - name: Build image
+        run: nix build .#oci-image --print-build-logs
+
+      - name: Push to the package registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -o pipefail
+          PROTO="${GITHUB_SERVER_URL%%://*}"
+          DOMAIN="${GITHUB_SERVER_URL#*://}"
+          # The runner may see the instance over LAN plain HTTP
+          # (git.home.lan) or TLS (git.3679.space); mirror whichever scheme
+          # the server URL carries instead of hardcoding either host.
+          if [ "$PROTO" = "https" ]; then TLS=true; else TLS=false; fi
+          VERSION="$(nix eval --raw .#oci-image.imageTag)"
+          DEST="docker://${DOMAIN}/${GITHUB_REPOSITORY}"
+          export TLS VERSION DEST
+          # ./result streams the archive and skopeo spools a pipe to
+          # /var/tmp by itself, so no tarball lands in the workspace. Push
+          # the version tag, then retag registry-side: :latest is what the
+          # atlas timer pulls.
+          # --insecure-policy: the nixos/nix job image ships no containers
+          # policy.json and skopeo refuses to start without one; the flag
+          # is equivalent to the insecureAcceptAnything default that a
+          # normal install carries in /etc/containers/policy.json.
+          nix shell nixpkgs#skopeo --command bash -c '
+            set -euo pipefail
+            ./result | skopeo --insecure-policy copy --dest-tls-verify=$TLS \
+              --dest-creds "${REGISTRY_USER}:${REGISTRY_TOKEN}" \
+              docker-archive:/dev/stdin "${DEST}:${VERSION}"
+            skopeo --insecure-policy copy --src-tls-verify=$TLS --dest-tls-verify=$TLS \
+              --src-creds "${REGISTRY_USER}:${REGISTRY_TOKEN}" \
+              --dest-creds "${REGISTRY_USER}:${REGISTRY_TOKEN}" \
+              "${DEST}:${VERSION}" "${DEST}:latest"
+          '

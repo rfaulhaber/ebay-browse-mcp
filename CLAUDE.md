@@ -13,7 +13,10 @@ cargo test --lib price_without_currency # single test, by substring of its name
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 nix build                               # also runs the test suite in the sandbox
+nix build .#oci-image                   # container image (Linux only); ./result streams a docker-archive to stdout
 ```
+
+`.forgejo/workflows/build-image.yml` builds `.#oci-image` on every push to `main` (on the self-hosted Forgejo remote `home`) and skopeo-pushes it to that instance's package registry, tagged `<cargo version>-<short rev>` and retagged `latest`. It authenticates with a `REGISTRY_TOKEN` actions secret — a `write:packages` PAT — because Forgejo's automatic actions token is registry-read-only. The image defaults to the HTTP transport (`EBAY_MCP_HTTP_ADDR=0.0.0.0:8080`); the CA bundle plus `SSL_CERT_FILE` in the image are load-bearing for the same reason tests can't build a `reqwest::Client` — the cert store is probed at runtime.
 
 `cargo-nextest` and `cargo-release` are in the dev shell. `direnv allow` enters it and installs the pre-commit hooks (clippy with `denyWarnings`, rustfmt), which run the dev-shell toolchain rather than nixpkgs' rustc so hook results match local `cargo`.
 

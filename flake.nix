@@ -48,15 +48,46 @@
 
         formatter = pkgs.alejandra;
 
-        packages = {
-          ${projectName} = pkgs.rustPlatform.buildRustPackage {
-            pname = projectName;
-            version = cargoToml.package.version;
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+        packages =
+          {
+            ${projectName} = pkgs.rustPlatform.buildRustPackage {
+              pname = projectName;
+              version = cargoToml.package.version;
+              src = ./.;
+              cargoLock.lockFile = ./Cargo.lock;
+            };
+            default = self'.packages.${projectName};
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Streamed rather than built: `./result` is a script writing a
+            # docker-archive to stdout, so CI pipes it straight into skopeo
+            # and no image tarball enters the store or the workspace.
+            oci-image = pkgs.dockerTools.streamLayeredImage {
+              name = projectName;
+              # Per-commit tags so the registry can roll back between
+              # releases; CI retags the newest one as :latest.
+              tag = "${cargoToml.package.version}-${self.shortRev or "dirty"}";
+              # reqwest probes the system CA store at runtime, and its probe
+              # list covers distro paths (ca-certificates.crt and friends)
+              # but not cacert's ca-bundle.crt — without both the bundle and
+              # SSL_CERT_FILE, every eBay call fails the TLS handshake.
+              contents = [pkgs.cacert];
+              config = {
+                Entrypoint = ["${self'.packages.${projectName}}/bin/${projectName}"];
+                # Same runtime user as the Dockerfile; numeric because the
+                # image has no /etc/passwd to resolve a name against.
+                User = "10001:10001";
+                Env = [
+                  "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                  # A detached container wants the remote transport; stdio
+                  # remains reachable by overriding this to an empty value,
+                  # which Config treats as unset.
+                  "EBAY_MCP_HTTP_ADDR=0.0.0.0:8080"
+                ];
+                ExposedPorts."8080/tcp" = {};
+              };
+            };
           };
-          default = self'.packages.${projectName};
-        };
 
         # Hooks run the same toolchain as the dev shell rather than
         # nixpkgs' rustc, so hook results match what cargo/rust-analyzer
