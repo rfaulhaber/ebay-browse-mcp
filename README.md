@@ -99,6 +99,7 @@ and makes the rest of this table required:
 | `EBAY_MCP_PUBLIC_URL` | HTTP mode | The MCP endpoint URL exactly as entered into the client, e.g. `https://mcp.example.com/mcp` |
 | `EBAY_MCP_ACCESS_KEY` | HTTP mode | Secret (16+ chars) typed on the OAuth consent page |
 | `EBAY_MCP_TOKEN_KEY` | HTTP mode | HMAC key (32+ chars) sealing all OAuth artifacts; rotating it revokes every issued token |
+| `EBAY_MCP_VERIFICATION_TOKEN` | no | Enables the eBay [account-deletion compliance endpoint](#6-ebay-account-deletion-compliance); 32–80 chars of letters, digits, `_`, `-` |
 
 Note that the sandbox has almost no listing data; a sandbox search returning
 nothing is normal and not a sign of misconfiguration.
@@ -181,6 +182,26 @@ URL from `EBAY_MCP_PUBLIC_URL`. When Claude opens the consent page, enter
 random chars --length 24   # EBAY_MCP_ACCESS_KEY
 random chars --length 48   # EBAY_MCP_TOKEN_KEY
 ```
+
+### 6. eBay account-deletion compliance
+
+eBay requires every production keyset to subscribe to marketplace
+account-deletion notifications (or apply for an exemption). Setting
+`EBAY_MCP_VERIFICATION_TOKEN` mounts an unauthenticated webhook at
+`/ebay/account-deletion` on the same origin as everything else. It answers
+eBay's challenge and acknowledges every notification; the server stores no
+per-user eBay data, so there is nothing to delete and the acknowledgment
+log line is the audit trail.
+
+``` nu
+random chars --length 40   # EBAY_MCP_VERIFICATION_TOKEN
+```
+
+Then, in the developer portal under Application Keys → Notifications →
+Marketplace Account Deletion, enter that token and the endpoint URL: the
+origin of `EBAY_MCP_PUBLIC_URL` plus `/ebay/account-deletion`. The server
+logs the exact URL at startup — register it verbatim, because the URL is an
+input to the challenge hash and any mismatch fails eBay's validation.
 
 ## Development
 

@@ -54,6 +54,7 @@ Test modules therefore open with `#![allow(clippy::unwrap_used, reason = "...")]
 - `server.rs` — five tools, plus the `INSTRUCTIONS` string sent at connection time.
 - `oauth.rs` — single-operator OAuth 2.1 provider for remote use. Distinct from `ebay/auth.rs`: there this server is an OAuth *client* toward eBay; here it is an authorization server + resource server toward Claude. Every artifact (client id, code, tokens) is a stateless HMAC-sealed `Claims` blob — domain separation comes from the serde `typ` tag, revocation is "rotate `EBAY_MCP_TOKEN_KEY`".
 - `remote.rs` — axum router: RFC 9728/8414 discovery documents, DCR, consent page, token endpoint, and the bearer gate in front of rmcp's `StreamableHttpService`. `router()` is generic over the MCP service so tests gate a stub — this is how the remote tests stay off the `reqwest::Client` path.
+- `account_deletion.rs` — eBay's marketplace-account-deletion webhook, merged by `remote.rs` *outside* the bearer gate (eBay's calls are unauthenticated) when `EBAY_MCP_VERIFICATION_TOKEN` is set.
 
 ### Remote-transport facts verified against Anthropic's docs (2026-08)
 
@@ -62,6 +63,16 @@ Test modules therefore open with `#![allow(clippy::unwrap_used, reason = "...")]
 - Claude registers a fresh DCR client per connection (hence stateless client ids), always uses PKCE S256, requests `offline_access` only because the AS metadata advertises it, and calls back to `https://claude.ai/api/mcp/auth_callback` (hosted) or port-agnostic `http://localhost/…` loopback (Claude Code).
 - Claude requires a public HTTPS hostname (it refuses names resolving to private/loopback addresses) and waits ≤10 s on OAuth endpoints. TLS terminates at a reverse proxy, which must forward the whole vhost: discovery and OAuth endpoints share the MCP origin.
 - rmcp 3.1.3 has **no server-side auth**; its `StreamableHttpServerConfig` is `#[non_exhaustive]` (use `::default().with_allowed_hosts(…)`), and its default `allowed_hosts` is localhost-only — the public hostname must be added or every proxied request is rejected.
+
+### Account-deletion compliance facts verified against eBay (2026-08)
+
+From the archived guide at `developer.ebay.com/develop/guides-v2/marketplace-user-account-deletion` (note `guides-v2` — the `/develop/guides/sell/…` URL some pages link to has never been archived) cross-checked against `eBay/event-notification-nodejs-sdk` source:
+
+- Challenge: `GET <endpoint>?challenge_code=…` must return 200 with JSON `{"challengeResponse": <hex>}` — SHA-256 over challengeCode + verificationToken + endpointURL **in that order** (confirmed in the SDK's `lib/validator.js`), lowercase hex.
+- The endpoint URL is a hash input, so it must byte-match what is registered in the portal; `AccountDeletion` derives it from the issuer origin + `ENDPOINT_PATH` and `main.rs` logs it at startup for the operator to copy.
+- Verification token: 32–80 chars, alphanumeric plus `_` and `-` only.
+- Notifications: POST, acknowledged by 200/201/202/204. 24 h without acks marks the endpoint down (eBay emails an alert); 30 more days marks the keyset non-compliant. Acks are therefore unconditional — a parse failure degrades the log line, never the response. Topic literal: `MARKETPLACE_ACCOUNT_DELETION`.
+- Validating `x-ebay-signature` (EC signature, key via the Notification API's `getPublicKey`) is documented as "should", not "must" — deliberately omitted here because the server persists no per-user eBay data, so a forged notification triggers nothing but a log line.
 
 ### The filter layer is the point of the project
 

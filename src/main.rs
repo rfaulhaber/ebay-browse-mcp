@@ -5,6 +5,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use ebay_browse_mcp::account_deletion::AccountDeletion;
 use ebay_browse_mcp::config::HttpConfig;
 use ebay_browse_mcp::oauth::OauthCore;
 use ebay_browse_mcp::{Config, EbayBrowseServer, remote};
@@ -106,7 +107,16 @@ async fn serve_http(server: EbayBrowseServer, http: HttpConfig) -> Result<(), St
             "::1",
         ]),
     );
-    let app = remote::router(core, &http.mcp_path, mcp_service);
+    let account_deletion = http.verification_token.clone().map(|token| {
+        let endpoint = Arc::new(AccountDeletion::new(&http.issuer, token));
+        tracing::info!(
+            endpoint_url = %endpoint.endpoint_url(),
+            "eBay account-deletion notifications enabled; register exactly this \
+             URL in the eBay developer portal"
+        );
+        endpoint
+    });
+    let app = remote::router(core, &http.mcp_path, mcp_service, account_deletion);
 
     let listener = tokio::net::TcpListener::bind(http.bind)
         .await

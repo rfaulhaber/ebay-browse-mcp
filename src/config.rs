@@ -203,6 +203,9 @@ pub struct HttpConfig {
     /// HMAC key sealing every OAuth artifact. Rotating it revokes all of
     /// them at once.
     pub token_key: Secret,
+    /// eBay marketplace-account-deletion verification token. Mounts the
+    /// compliance webhook when present.
+    pub verification_token: Option<Secret>,
 }
 
 impl HttpConfig {
@@ -281,6 +284,17 @@ impl HttpConfig {
             });
         }
 
+        let verification_token = optional("EBAY_MCP_VERIFICATION_TOKEN")
+            .map(|token| match verification_token_error(&token) {
+                None => Ok(Secret::new(token)),
+                Some(reason) => Err(ConfigError::InvalidVar {
+                    var: "EBAY_MCP_VERIFICATION_TOKEN",
+                    value: "<redacted>".to_owned(),
+                    reason: reason.to_owned(),
+                }),
+            })
+            .transpose()?;
+
         Ok(Some(Self {
             bind,
             public_url,
@@ -289,8 +303,23 @@ impl HttpConfig {
             public_host,
             access_key: Secret::new(access_key),
             token_key: Secret::new(token_key),
+            verification_token,
         }))
     }
+}
+
+/// eBay's stated constraints on an account-deletion verification token.
+fn verification_token_error(token: &str) -> Option<&'static str> {
+    if !(32..=80).contains(&token.len()) {
+        return Some("eBay requires 32-80 characters");
+    }
+    if !token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Some("eBay allows only letters, digits, underscores, and hyphens");
+    }
+    None
 }
 
 fn required(var: &'static str) -> Result<String, ConfigError> {
@@ -327,6 +356,16 @@ mod tests {
             Environment::Sandbox.browse_base_url(),
             "https://api.sandbox.ebay.com/buy/browse/v1"
         );
+    }
+
+    #[test]
+    fn verification_token_constraints_follow_ebay() {
+        assert_eq!(verification_token_error(&"a".repeat(32)), None);
+        assert_eq!(verification_token_error(&"a".repeat(80)), None);
+        assert_eq!(verification_token_error("A1-_".repeat(10).as_str()), None);
+        assert!(verification_token_error(&"a".repeat(31)).is_some());
+        assert!(verification_token_error(&"a".repeat(81)).is_some());
+        assert!(verification_token_error(&"a!".repeat(20)).is_some());
     }
 
     #[test]

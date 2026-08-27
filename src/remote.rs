@@ -2,10 +2,10 @@
 //! service with the OAuth provider from [`crate::oauth`].
 //!
 //! Everything lives on one origin: the two discovery documents, the
-//! authorization endpoints, and the MCP endpoint itself behind a bearer
-//! gate. Claude's discovery starts from a 401 — it ignores
-//! `WWW-Authenticate` on a 200 — so the gate always answers with the
-//! challenge shape from RFC 9728 §5.1.
+//! authorization endpoints, the MCP endpoint itself behind a bearer gate,
+//! and (when configured) eBay's account-deletion webhook. Claude's
+//! discovery starts from a 401 — it ignores `WWW-Authenticate` on a 200 —
+//! so the gate always answers with the challenge shape from RFC 9728 §5.1.
 //!
 //! TLS is deliberately out of scope: the binary serves plain HTTP and
 //! expects a reverse proxy to terminate HTTPS for the public hostname.
@@ -24,6 +24,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::account_deletion::AccountDeletion;
 use crate::oauth::{OauthCore, OauthError, TokenGrant};
 
 type Core = Arc<OauthCore>;
@@ -31,7 +32,12 @@ type Core = Arc<OauthCore>;
 /// Builds the public router. `mcp_service` is generic so tests can gate a
 /// stub instead of a real MCP transport (constructing one would build a
 /// `reqwest::Client`, which the Nix sandbox cannot do).
-pub fn router<S>(core: Core, mcp_path: &str, mcp_service: S) -> Router
+pub fn router<S>(
+    core: Core,
+    mcp_path: &str,
+    mcp_service: S,
+    account_deletion: Option<Arc<AccountDeletion>>,
+) -> Router
 where
     S: tower::Service<Request, Error = Infallible> + Clone + Send + Sync + 'static,
     S::Response: IntoResponse + 'static,
@@ -40,7 +46,7 @@ where
     let gated = Router::new()
         .route_service(mcp_path, mcp_service)
         .route_layer(middleware::from_fn_with_state(core.clone(), bearer_gate));
-    Router::new()
+    let router = Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
             get(authorization_server_metadata),
@@ -59,7 +65,12 @@ where
         .route("/token", post(token))
         .route("/register", post(register))
         .with_state(core)
-        .merge(gated)
+        .merge(gated);
+    // eBay itself calls the deletion endpoint, so it stays outside the gate.
+    match account_deletion {
+        Some(endpoint) => router.merge(crate::account_deletion::router(endpoint)),
+        None => router,
+    }
 }
 
 async fn authorization_server_metadata(State(core): State<Core>) -> Json<serde_json::Value> {
@@ -506,7 +517,7 @@ mod tests {
 
     const ACCESS_KEY: &str = "test-access-key-for-remote";
 
-    fn test_router() -> Router {
+    fn test_router_with(account_deletion: Option<Arc<AccountDeletion>>) -> Router {
         let core = Arc::new(OauthCore::new(
             "https://mcp.example.test".to_owned(),
             "https://mcp.example.test/mcp".to_owned(),
@@ -516,7 +527,11 @@ mod tests {
         let stub = tower::service_fn(|_request: Request| async {
             Ok::<_, Infallible>((StatusCode::OK, "mcp-ok").into_response())
         });
-        router(core, "/mcp", stub)
+        router(core, "/mcp", stub, account_deletion)
+    }
+
+    fn test_router() -> Router {
+        test_router_with(None)
     }
 
     async fn send(router: &Router, request: HttpRequest<Body>) -> (StatusCode, String, Response) {
@@ -873,6 +888,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unsupported_grant_type"));
+    }
+
+    #[tokio::test]
+    async fn account_deletion_endpoint_bypasses_the_bearer_gate() {
+        let router = test_router_with(Some(Arc::new(AccountDeletion::new(
+            "https://mcp.example.test",
+            Secret::new("0123456789abcdefghijklmnopqrstuv"),
+        ))));
+        let (status, body, _) = send(
+            &router,
+            HttpRequest::get("/ebay/account-deletion?challenge_code=abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("challengeResponse"));
+    }
+
+    #[tokio::test]
+    async fn account_deletion_endpoint_is_absent_without_config() {
+        let (status, _, _) = send(
+            &test_router(),
+            HttpRequest::get("/ebay/account-deletion?challenge_code=abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
