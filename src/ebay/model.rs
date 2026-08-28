@@ -291,6 +291,19 @@ impl From<RawSearchResponse> for SearchResults {
     }
 }
 
+/// Seller HTML arrives as a full document (store template, stylesheets,
+/// navigation); only its rendered text is worth context tokens. A
+/// description that was nothing but markup comes out absent, not empty.
+fn text_from_html<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let html = Option::<String>::deserialize(deserializer)?;
+    Ok(html
+        .map(|html| super::html::html_to_text(&html))
+        .filter(|text| !text.is_empty()))
+}
+
 /// Full item detail from `item/{item_id}` and its siblings.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -299,8 +312,9 @@ pub struct Item {
     pub legacy_item_id: Option<String>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
-    /// Seller-authored listing description. Raw HTML, and often very long —
-    /// expect thousands of characters.
+    /// Seller-authored listing description, reduced to its visible text.
+    /// Often still long — sellers author it as a full page.
+    #[serde(default, deserialize_with = "text_from_html")]
     pub description: Option<String>,
     /// Condensed condition and aspect summary. Much shorter than
     /// `description`, and usually enough to judge a listing.
@@ -445,6 +459,29 @@ mod tests {
         let serialized = out.to_string();
         assert!(!serialized.contains("thumbnailImages"));
         assert!(!serialized.contains("adultOnly"));
+    }
+
+    #[test]
+    fn an_item_description_arrives_as_text_not_html() {
+        let raw = serde_json::json!({
+            "itemId": "v1|1|0",
+            "description": "<style>.x{}</style><p>Solid &amp; tested.</p><p>Ships fast.</p>",
+        });
+        let item: Item = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            item.description.as_deref(),
+            Some("Solid & tested.\nShips fast.")
+        );
+    }
+
+    #[test]
+    fn a_description_of_pure_markup_becomes_absent() {
+        let raw = serde_json::json!({
+            "itemId": "v1|1|0",
+            "description": "<div><img src=\"banner.jpg\">&nbsp;</div>",
+        });
+        let item: Item = serde_json::from_value(raw).unwrap();
+        assert_eq!(item.description, None);
     }
 
     #[test]

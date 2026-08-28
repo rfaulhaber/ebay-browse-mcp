@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client;
 pub mod filter;
+mod html;
 pub mod model;
 
 use std::{fmt, str::FromStr};
