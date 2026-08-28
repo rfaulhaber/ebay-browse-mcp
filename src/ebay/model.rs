@@ -263,7 +263,7 @@ pub struct SearchResults {
     pub refinements: Option<Refinements>,
     /// Non-fatal complaints from eBay — for instance an ignored filter. Worth
     /// surfacing, because a silently dropped filter looks like a wrong answer.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<ApiError>,
 }
 
@@ -445,6 +445,32 @@ mod tests {
         let serialized = out.to_string();
         assert!(!serialized.contains("thumbnailImages"));
         assert!(!serialized.contains("adultOnly"));
+    }
+
+    #[test]
+    fn the_schema_never_requires_a_field_serialization_can_omit() {
+        // MCP clients validate structured content against the declared output
+        // schema, so a field that is `required` there but skipped when empty
+        // fails every response that omits it — the happy path.
+        let raw = serde_json::json!({
+            "total": 0, "limit": 50, "offset": 0, "itemSummaries": []
+        });
+        let results =
+            SearchResults::from(serde_json::from_value::<RawSearchResponse>(raw).unwrap());
+        let serialized = serde_json::to_value(&results).unwrap();
+
+        let schema = serde_json::to_value(schemars::schema_for!(SearchResults)).unwrap();
+        for name in schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+        {
+            assert!(
+                serialized.get(name).is_some(),
+                "schema requires `{name}` but a minimal response omits it"
+            );
+        }
     }
 
     #[test]
